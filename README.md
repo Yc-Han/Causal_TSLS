@@ -2,7 +2,7 @@
 
 This code is part of my work at the seminar on causal inference at the University of Munich, supervised by Prof. Daniel Wilhelm.
 
-It is based on Blandhol et al. (2022): *When is TSLS actually LATE*.
+It is based on Blandhol et al. (2022): *When is TSLS actually LATE*. https://a-torgovitsky.github.io/tsls-weights.pdf
 
 The codes are used to generate coefficients as shown in the presentation and the term paper.
 
