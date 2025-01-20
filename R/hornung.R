@@ -4,7 +4,7 @@ library(tidyverse)
 library(ddml)
 
 # Load the data
-textiles <- as.data.frame(read_dta("hornung-data-textiles.dta"))
+textiles <- as.data.frame(read_dta("data/hornung-data-textiles.dta"))
 
 # Define Variables
 textiles_cleaned <- textiles %>%

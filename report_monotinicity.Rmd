@@ -1,12 +1,35 @@
+---
+title: "Report Monotonicity Extraction"
+author: "Yichen Han"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, warning=FALSE, message=FALSE}
 library(AER)
 library(haven)
 library(tidyverse)
 library(ddml)
+library(ranger)
+```
 
-### Data
+## Card (1995)
+
+Adapted analysis plan.
+
+- $N=3010$ individuals
+- $Y$: continuous, log hourly wage
+- $T$: binary, received education > 12 yrs
+- $Z$: binary, presence of college nearby
+- $X$: 4 binary covariates: work experience > 8 yrs,  3 indicators for race and location of residence.
+
+```{r data}
 card <- read_dta("https://raw.github.com/scunning1975/mixtape/master/card.dta")
 suppressMessages(attach(card))
-
 Y <- lwage
 D <- as.numeric(educ > 13)
 expbin <- as.numeric(exper > 8)
@@ -17,40 +40,12 @@ Y <- Y[idx_complete]
 D <- D[idx_complete]
 X <- X[idx_complete, ]
 Z <- Z[idx_complete]
-
 df <- data.frame(Y, D, Z, X)
+```
 
-### Estimation OLS
-ols_reg <- lm(Y ~ D + X)
-summary(ols_reg)
-coefficients(ols_reg)[2]
+If saturated, the data is:
 
-### Estimation IV, with covariates
-# first stage
-fs <- lm(D ~ X + Z)
-summary(fs)
-# test relevance condition
-coeftest(fs)
-# store first-stage slope coefficient
-fsCoef <- coef(fs)["Z"]
-# reduced form
-rf <- lm(Y ~ X + Z)
-summary(rf)
-# test exclusion restriction: Z not correlated with error term
-err <- residuals(rf)
-cor.test(Z, err)
-
-# store reduced-form slope coefficient
-rfCoef <- coef(rf)["Z"]
-# divide reduced-form coefficient by first-stage coefficient
-rfCoef / fsCoef
-# alternative way of estimating LATE
-summary(ivreg(Y ~ X + D | X + Z))
-
-regZ <- lm(Z ~ X)
-resettest(regZ)
-
-### Estimation IV with saturation
+```{r saturated}
 X1 <- X[, 1]
 X2 <- X[, 2]
 X3 <- X[, 3]
@@ -58,26 +53,14 @@ X4 <- X[, 4]
 X_full <- cbind(X, X1 * X2, X1 * X3, X1 * X4, X2 * X3, X2 * X4, X3 * X4,
                 X1 * X2 * X3, X1 * X2 * X4, X1 * X3 * X4, X2 * X3 * X4,
                 X1 * X2 * X3 * X4)
-
 Z_int <- cbind(Z, Z * X_full)
+```
 
-summary(ivreg(Y ~ X1*X2*X3*X4 + D | X1*X2*X3*X4 + Z))
+## DDML
 
-regZ_full <- lm(Z_int ~ X_full)
-resettest(regZ_full)
+For simplicity, we omit `ivreg`, and only report outputs from DDML.
 
-### ivreg without X
-summary(ivreg(Y ~ D | Z))
-
-### check homogeneous treatment effect
-summary(lm(Y ~ D * X1 * X2 * X3 * X4))
-# Fit the full model:
-mod_full <- lm(Y ~ D * X1 * X2 * X3 * X4)
-# Fit the reduced model (no D interactions, i.e., only main effect of D):
-mod_reduced <- lm(Y ~ D + X1 + X2 + X3 + X4)
-# Compare models:
-anova(mod_reduced, mod_full)
-
+```{r ddml}
 ### Estimation DDML
 # -------------- estimating beta_rich using DDML
 set.seed(123)
@@ -92,7 +75,7 @@ pliv_rich <- ddml_pliv(Y, D, Z, X,
                             ensemble_type = c('nnls', 'nnls1', 'ols','average'),
                             shortstack = TRUE,
                             sample_folds = 10,
-                            silent = FALSE)
+                            silent = TRUE)
 summary(pliv_rich)
 # -------------- estimating LATE using DDML
 late_fit_short <- ddml_late(Y, D, Z, X,
@@ -100,12 +83,26 @@ late_fit_short <- ddml_late(Y, D, Z, X,
                             ensemble_type = c('nnls', 'nnls1', 'ols','average'),
                             shortstack = TRUE,
                             sample_folds = 10,
-                            silent = FALSE)
+                            silent = TRUE)
 summary(late_fit_short)
+```
 
-### estimate the possible weights on beta_pliv.
+## Weight Estimation
 
-library(ranger)
+Note that DDML-PLIV outputs $\beta_{\text{rich}}$, and for the binary case
+$$
+\beta_{\text{rich}} = \mathbb E\left[\beta_{\text{acr}}(X)\frac{P[T(1) > T(0) | X]\mathbb V[Z|X]}{\mathbb E[P[T(1) > T(0) | X]\mathbb V[Z|X]]}\right]
+$$
+
+where $\beta_{\text{acr}}(X):= \mathbb E[Y(T(1))-Y(T(0))|T(1)>T(0)]$.
+
+We regard $\frac{P[T(1) > T(0) | X]\mathbb V[Z|X]}{\mathbb E[P[T(1) > T(0) | X]\mathbb V[Z|X]]}$ as the weights.
+
+We estimate $P[T(1) > T(0) | X]$ and $\mathbb V[Z|X]$ using two random forests.
+
+First, define the function to estimate weights.
+
+```{r weights}
 estimate_rich_weights <- function(df, z_vars = "Z", plot=TRUE) {
   set.seed(123)
   # 1) Identify covariates: all columns except Y, D, Z
@@ -183,21 +180,45 @@ estimate_rich_weights <- function(df, z_vars = "Z", plot=TRUE) {
     group_summary = group_summary
   ))
 }
+```
 
-# Apply the function to the card data
-df_rich <- estimate_rich_weights(df)
+Estimate weights under saturated $X$ and simple $Z$.
+
+```{r weights_est, echo=FALSE}
 df_full <- data.frame(Y, D, Z, X_full)
 df_rich_full <- estimate_rich_weights(df_full)
+```
 
+Estimate weights under saturated $X$ and saturated $Z$ (Saturate and Weight).
 
-### Saturate and weight
+```{r weights_est2, echo=FALSE}
 df_sw <- data.frame(Y, D, Z_int, X_full)
 z_vars <- colnames(df_sw)[3:18]
 df_sw_rich <- estimate_rich_weights(df_sw, z_vars = z_vars)
+```
 
+## Monotonicity Extraction
 
-### in df, remove: black&smsa=1 and others=0, or expbin,black,south=1 and others=0,
-### or expbin,south=1 and others=0, or black,south,smsa=1 and others=0
+Looking at the graphs, we suspect, under rich covariates,
+
+- black, smsa, not south, not expbin
+- expbin, black, south, not smsa
+- expbin, south, not smsa, not black
+- black, south, smsa, not expbin
+
+are not correct in monotonicity.
+
+Further, under Saturation and Weight,
+
+- black, south, smsa, not expbin
+- black, smsa, not south, not expbin
+
+are with some confidence, defiers.
+
+Hypothesis: removing them from the data and doing PLIV again will yield LATE.
+
+First remove all four groups.
+```{r monotonicity 1}
 df_comp <- df %>%
   filter(!(black == 1 & smsa == 1 & expbin == 0 & south == 0),
          !(expbin == 1 & black == 1 & south == 1 & smsa == 0),
@@ -214,6 +235,30 @@ pliv_comp <- ddml_pliv(Y, D, Z, X_comp,
                        ensemble_type = c('nnls', 'nnls1', 'ols','average'),
                        shortstack = TRUE,
                        sample_folds = 10,
-                       silent = FALSE)
+                       silent = TRUE)
 summary(pliv_comp)
-### We replicated LATE!!!
+```
+
+Clearly, the hypothesis is supported by the data.
+
+Then remove the two groups with some confidence.
+```{r monotonicity 2}
+df_comp <- df %>%
+  filter(!(black == 1 & smsa == 1 & expbin == 0 & south == 0),
+         !(black == 1 & south == 1 & smsa == 1 & expbin == 0))
+Y <- df_comp$Y
+D <- df_comp$D
+Z <- df_comp$Z
+X_comp <- df_comp %>% select(-Y, -D, -Z) %>% as.matrix()
+# redo PLIV
+set.seed(123)
+pliv_comp <- ddml_pliv(Y, D, Z, X_comp,
+                       learners = learners_multiple,
+                       ensemble_type = c('nnls', 'nnls1', 'ols','average'),
+                       shortstack = TRUE,
+                       sample_folds = 10,
+                       silent = TRUE)
+summary(pliv_comp)
+```
+
+The result is not entirely the same, so removing only the best-suspected defiers is not enough.

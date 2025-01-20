@@ -6,7 +6,7 @@ library(sandwich)
 library(ddml)
 
 # Load the data from lyme/
-lyme <- read.csv("lyme/lyme2018.csv")
+lyme <- read.csv("data/lyme2018.csv")
 lyme <- lyme[complete.cases(lyme),]
 
 ### Define Variables: without Year
