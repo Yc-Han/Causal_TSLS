@@ -3,6 +3,7 @@ library(haven)
 library(tidyverse)
 library(grf)
 library(ddml)
+library(ranger)
 
 ### Data
 card <- read_dta("https://raw.github.com/scunning1975/mixtape/master/card.dta")
@@ -35,10 +36,10 @@ rfCoef <- coef(rf)["Z"]
 # divide reduced-form coefficient by first-stage coefficient
 rfCoef / fsCoef
 # alternative way of estimating LATE
-summary(ivreg(Y ~ D + X | Z + X))
+summary(ivreg(Y ~ D + X | Z + X), diagnostics = TRUE)
 
 # ivreg without X
-summary(ivreg(Y ~ D | Z))
+summary(ivreg(Y ~ D | Z), diagnostics = TRUE)
 
 # -------------- estimating beta_rich using DDML
 
@@ -55,6 +56,80 @@ pliv_rich <- ddml_pliv(Y, D, Z, X,
                             sample_folds = 10,
                             silent = FALSE)
 summary(pliv_rich)
+
+# -------------- estimating weights
+covariates <- setdiff(names(df), c("Y", "D", "Z"))
+set.seed(123)
+formula_D <- as.formula(
+  paste("D ~ ", paste(c("Z", covariates), collapse = " + "))
+)
+model_D <- ranger(formula_D, data = df)
+z_values <- c(0, 1)
+pred_array <- array(
+  NA_real_,
+  dim = c(nrow(df), model_D$num.trees, length(z_values))
+)
+for (i in seq_along(z_values)) {
+  df_z <- transform(df, Z = z_values[i])
+  preds <- predict(model_D, data = df_z, predict.all = TRUE)$predictions
+  pred_array[,, i] <- preds
+}
+is_non_decreasing <- function(vec) {
+  all(diff(vec) >= 0)
+}
+mono_matrix <- matrix(0L, nrow = nrow(df), ncol = model_D$num.trees)
+for (r in seq_len(nrow(df))) {
+  for (b in seq_len(model_D$num.trees)) {
+    pred_vec <- pred_array[r, b, ]
+    if (is_non_decreasing(pred_vec)) {
+      mono_matrix[r, b] <- 1
+    }
+  }
+}
+mono_prob <- rowMeans(mono_matrix)
+df$mono <- mono_prob
+boxplot(mono_prob, main = "Monotonicity Probability")
+sum(mono_prob < 0.5) / nrow(df)
+
+set.seed(123)
+formula_Z <- as.formula(
+  paste("Z ~", paste(covariates, collapse = " + "))
+)
+model_Z <- ranger(formula_Z, data = df, probability = TRUE)
+
+pZ_hat <- predict(model_Z, data = df, type = "response")$predictions[,2]
+vZ_hat <- pZ_hat * (1 - pZ_hat)
+df$VarZ <- vZ_hat
+# 6) Final weights = mono_prob * var(Z|X), normalized to sum to 1
+w_raw <- mono_prob * vZ_hat
+w_final <- w_raw / sum(w_raw)
+df$w_final <- w_final
+
+# explore dependence of w_final on covariates
+# 1. ranger with feature importance
+set.seed(123)
+formula_w <- as.formula(
+  paste("w_final ~", paste(covariates, collapse = " + "))
+)
+model_w <- ranger(formula_w , data = df, importance = "permutation")
+importance(model_w)
+# 2. kmeans clustering
+set.seed(123)
+K <- 16
+km_out <- kmeans(X, centers = K, nstart = 20)
+df$cluster <- km_out$cluster
+
+cluster_summary <- df %>%
+  group_by(cluster) %>%
+  summarize(
+    avg_varZ = mean(VarZ),
+    avg_mono = mean(mono),
+    sum_w = sum(w_final),
+    avg_w = mean(w_final),
+    n = n(),
+    # average of each covariate
+    across(covariates, ~ round(mean(.x), 3))
+  )
 
 # -------------- Decomposing the estimator according to Blandhol et al. 2022
 
